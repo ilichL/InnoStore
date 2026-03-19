@@ -12,7 +12,7 @@ using Shared.ValueModels;
 
 namespace Application.Services;
 
-internal sealed class OrderService(IOrderRepository orderRepository,
+public sealed class OrderService(IOrderRepository orderRepository,
     IProductSizeRepository productSizeRepository,
     IUserRepository userRepository,
     IInternalOrderAuditService internalOrderAuditService,
@@ -53,33 +53,55 @@ internal sealed class OrderService(IOrderRepository orderRepository,
         return order.ToDto();
     }
 
-    public async Task<OrderDto> CancelOrderAsync(CancelOrderModel cancelOrderModel, CancellationToken cancellationToken = default)
+    public async Task<OrderDto> CancelOrderAsync(
+        CancelOrderModel cancelOrderModel,
+        CancellationToken cancellationToken = default)
     {
-        var order = await orderRepository.GetByIdAsync(cancelOrderModel.OrderId, cancellationToken) ??
-                    throw new EntityNotFoundException<Order>(cancelOrderModel.OrderId);
+        var orderId = cancelOrderModel.OrderId;
+        var revertedByUserId = cancelOrderModel.RevertedByUserId;
 
-        if (order is { Status: OrderStatus.Canceled or OrderStatus.Completed })
+        var order = await orderRepository.GetByIdAsync(orderId, cancellationToken);
+        if (order is null)
         {
-            throw new InvalidOperationException($"Order {order.Id} is already {order.Status} and cannot be canceled.");
+            throw new EntityNotFoundException<Order>(orderId);
+        }
+
+        var isAlreadyClosed =
+            order.Status == OrderStatus.Canceled ||
+            order.Status == OrderStatus.Completed;
+
+        if (isAlreadyClosed)
+        {
+            throw new InvalidOperationException(
+                $"Order {order.Id} is already {order.Status} and cannot be canceled.");
         }
 
         order.Status = OrderStatus.Canceled;
 
         await using var transaction = await transactionManager.BeginTransactionAsync(cancellationToken);
+
         await orderRepository.UpdateAsync(order, cancellationToken);
-        await internalOrderAuditService.AddChangeOrderStatusAsync(cancelOrderModel.RevertedByUserId, order, cancellationToken);
+        await internalOrderAuditService.AddChangeOrderStatusAsync(revertedByUserId, order, cancellationToken);
         await RefundOrderTransactionAsync(order, cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
 
-        return order.ToDto();
+        var orderDto = order.ToDto();
+        return orderDto;
     }
 
-    public async Task<OrderDto> GetOrderByIdAsync(Guid orderId, CancellationToken cancellationToken = default)
+    public async Task<OrderDto> GetOrderByIdAsync(
+        Guid orderId,
+        CancellationToken cancellationToken = default)
     {
-        var order = await orderRepository.GetByIdAsync(orderId, cancellationToken) ??
-                    throw new EntityNotFoundException<Order>(orderId);
-        return order.ToDto();
+        var order = await orderRepository.GetByIdAsync(orderId, cancellationToken);
+        if (order is null)
+        {
+            throw new EntityNotFoundException<Order>(orderId);
+        }
+
+        var orderDto = order.ToDto();
+        return orderDto;
     }
 
     public async Task<IEnumerable<OrderDto>> GetOrdersByUserIdAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -171,7 +193,7 @@ internal sealed class OrderService(IOrderRepository orderRepository,
         var price =
             productSize.Product?.Price ??
             throw new EntityNotFoundException<Product>(productSize.ProductId);
-
+         
         return price;
     }
 }
